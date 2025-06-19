@@ -1,3 +1,3 @@
 """Web QA tool using Browser-Use agents for testing AI-generated websites."""
 
-__version__ = "0.1.1" 
+__version__ = "0.1.2" 
