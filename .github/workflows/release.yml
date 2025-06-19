@@ -1,0 +1,135 @@
+name: Create Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: "Version bump type"
+        required: true
+        default: "patch"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      custom_version:
+        description: "Custom version (optional, overrides version_type)"
+        required: false
+        type: string
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write # For PyPI trusted publishing
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install toml
+
+      - name: Get current version
+        id: current_version
+        run: |
+          python -c "
+          import toml
+          with open('pyproject.toml', 'r') as f:
+              data = toml.load(f)
+          print(f'current_version={data[\"project\"][\"version\"]}')
+          " >> $GITHUB_OUTPUT
+
+      - name: Calculate new version
+        id: new_version
+        run: |
+          if [ -n "${{ github.event.inputs.custom_version }}" ]; then
+            echo "new_version=${{ github.event.inputs.custom_version }}" >> $GITHUB_OUTPUT
+          else
+            python3 -c "current='${{ steps.current_version.outputs.current_version }}'; version_type='${{ github.event.inputs.version_type }}'; major,minor,patch=map(int,current.split('.')); exec('major+=1;minor=0;patch=0' if version_type=='major' else 'minor+=1;patch=0' if version_type=='minor' else 'patch+=1'); print(f'new_version={major}.{minor}.{patch}')" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update version in pyproject.toml and __init__.py
+        run: |
+          python3 -c "import toml,re; data=toml.load(open('pyproject.toml','r')); data['project']['version']='${{ steps.new_version.outputs.new_version }}'; toml.dump(data,open('pyproject.toml','w')); content=open('vibetest/__init__.py','r').read(); open('vibetest/__init__.py','w').write(re.sub(r'__version__ = \".*\"', '__version__ = \"${{ steps.new_version.outputs.new_version }}\"', content))"
+
+      - name: Commit version bump
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add pyproject.toml vibetest/__init__.py
+          git commit -m "🔖 Bump version to ${{ steps.new_version.outputs.new_version }}"
+          git push
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get the previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
+
+          if [ -z "$PREV_TAG" ]; then
+            echo "changelog=Initial release of YOP Go SDK" >> $GITHUB_OUTPUT
+          else
+            echo "changelog<<EOF" >> $GITHUB_OUTPUT
+            echo "### Changes since $PREV_TAG" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_OUTPUT
+            git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD | grep -v "Merge pull request" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.new_version.outputs.new_version }}
+          name: Release v${{ steps.new_version.outputs.new_version }}
+          body: |
+            ## 🚀 Vibetest v${{ steps.new_version.outputs.new_version }}
+
+            ### 📝 Changes
+
+            ${{ steps.changelog.outputs.changelog }}
+
+            ---
+            **Happy testing with Vibetest! 🎉**
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+
+      - name: Run tests before publishing
+        run: |
+          pip install pytest pytest-asyncio pytest-cov
+          pip install -e .
+          # 如果有测试文件，运行测试
+          if [ -d "tests" ] || [ -f "test_*.py" ] || find . -name "*_test.py" -type f | grep -q .; then
+            pytest --cov=vibetest --cov-report=xml
+          else
+            echo "No tests found"
+          fi
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Build package
+        run: python -m build
+
+      - name: Check package
+        run: twine check dist/*
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          verbose: true
